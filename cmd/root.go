@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strings"
 
@@ -24,18 +24,16 @@ var exit_77 bool
 // the number of times to retry commands that pull data from the network
 const numRetriesNetCommands = 5
 
+// can be overridden at compile-time
+const etcPivotFile = "/etc/pivot/image-pullspec"
+const runPivotRebootFile = "/run/pivot/reboot-needed"
+
 // RootCmd houses the cobra config for the main command
 var RootCmd = &cobra.Command{
-	Use:   "pivot [FLAGS] <IMAGE_PULLSPEC>",
+	Use:   "pivot [FLAGS] [IMAGE_PULLSPEC]",
 	DisableFlagsInUseLine: true,
 	Short: "Allows moving from one OSTree deployment to another",
-	//	Long: ``,
-	Args: func(cmd *cobra.Command, args []string) error {
-		if len(args) < 1 {
-			return errors.New("An image name must be provided")
-		}
-		return nil
-	},
+	Args: cobra.MaximumNArgs(1),
 	Run: Execute,
 }
 
@@ -150,8 +148,31 @@ func pullAndRebase(container string) (imgid string, changed bool) {
 
 // Execute runs the command
 func Execute(cmd *cobra.Command, args []string) {
-	container := args[0]
+	var fromFile bool
+	var container string
+	if len(args) > 0 {
+		container = args[0]
+		fromFile = false
+	} else {
+		glog.Infof("Using image pullspec from %s", etcPivotFile)
+		if bytes, err := ioutil.ReadFile(etcPivotFile); err != nil {
+			glog.Fatalf("Failed to read from %s: %v", etcPivotFile, err)
+		} else {
+			container = strings.TrimSpace(string(bytes))
+			fromFile = true
+		}
+	}
+
 	imgid, changed := pullAndRebase(container)
+
+	// Delete the file now that we successfully rebased
+	if fromFile {
+		if err := os.Remove(etcPivotFile); err != nil {
+			if !os.IsNotExist(err) {
+				glog.Fatal("Failed to delete %s: %v", etcPivotFile, err)
+			}
+		}
+	}
 
 	// By default, delete the image.
 	if !keep {
@@ -165,7 +186,7 @@ func Execute(cmd *cobra.Command, args []string) {
 			os.Exit(77)
 		}
 	// Reboot the machine if asked to do so
-	} else if reboot {
+	} else if reboot || utils.FileExists(runPivotRebootFile) {
 		utils.Run("systemctl", "reboot")
 	}
 }
